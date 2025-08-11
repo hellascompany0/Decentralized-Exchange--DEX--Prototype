@@ -10,6 +10,8 @@
 (define-constant err-pool-exists (err u108))
 
 (define-data-var fee-rate uint u300)
+(define-data-var reward-rate uint u100)
+(define-data-var reward-token principal tx-sender)
 
 (define-map pools
   { token-x: principal, token-y: principal }
@@ -29,6 +31,14 @@
 (define-map token-balances
   { user: principal, token: principal }
   { balance: uint }
+)
+
+(define-map reward-data
+  { user: principal, token-x: principal, token-y: principal }
+  { 
+    last-claim-height: uint,
+    accumulated-rewards: uint
+  }
 )
 
 (define-private (get-pool-key (token-x principal) (token-y principal))
@@ -54,6 +64,13 @@
   (default-to 
     { balance: u0 }
     (map-get? token-balances { user: user, token: token })
+  )
+)
+
+(define-read-only (get-reward-info (user principal) (token-x principal) (token-y principal))
+  (default-to 
+    { last-claim-height: u0, accumulated-rewards: u0 }
+    (map-get? reward-data { user: user, token-x: token-x, token-y: token-y })
   )
 )
 
@@ -129,6 +146,38 @@
   )
 )
 
+(define-private (calculate-pending-rewards (user principal) (token-x principal) (token-y principal))
+  (let 
+    (
+      (pool-key (get-pool-key token-x token-y))
+      (user-lp-balance (get amount (get-user-lp-balance user (get token-x pool-key) (get token-y pool-key))))
+      (reward-info (get-reward-info user token-x token-y))
+      (last-claim (get last-claim-height reward-info))
+      (current-height stacks-block-height)
+      (blocks-elapsed (- current-height last-claim))
+      (reward-per-block (var-get reward-rate))
+    )
+    (/ (* user-lp-balance reward-per-block blocks-elapsed) u10000)
+  )
+)
+
+(define-private (update-rewards (user principal) (token-x principal) (token-y principal))
+  (let 
+    (
+      (current-rewards (get accumulated-rewards (get-reward-info user token-x token-y)))
+      (pending-rewards (calculate-pending-rewards user token-x token-y))
+      (total-rewards (+ current-rewards pending-rewards))
+    )
+    (map-set reward-data 
+      { user: user, token-x: token-x, token-y: token-y }
+      { 
+        last-claim-height: stacks-block-height,
+        accumulated-rewards: total-rewards
+      }
+    )
+  )
+)
+
 (define-public (create-pool (token-x principal) (token-y principal) (amount-x uint) (amount-y uint))
   (let 
     (
@@ -156,6 +205,10 @@
                 { user: tx-sender, token-x: (get token-x pool-key), token-y: (get token-y pool-key) }
                 { amount: initial-liquidity }
               )
+              (map-set reward-data 
+                { user: tx-sender, token-x: (get token-x pool-key), token-y: (get token-y pool-key) }
+                { last-claim-height: stacks-block-height, accumulated-rewards: u0 }
+              )
               (ok initial-liquidity)
             )
         )
@@ -179,6 +232,7 @@
             (liquidity (calculate-liquidity reserve-x reserve-y amount-x amount-y total-supply))
             (current-lp-balance (get amount (get-user-lp-balance tx-sender (get token-x pool-key) (get token-y pool-key))))
           )
+          (update-rewards tx-sender (get token-x pool-key) (get token-y pool-key))
           (try! (transfer-tokens tx-sender (as-contract tx-sender) token-x amount-x))
           (try! (transfer-tokens tx-sender (as-contract tx-sender) token-y amount-y))
           (map-set pools pool-key {
@@ -214,6 +268,7 @@
             (amount-x (/ (* liquidity reserve-x) total-supply))
             (amount-y (/ (* liquidity reserve-y) total-supply))
           )
+          (update-rewards tx-sender (get token-x pool-key) (get token-y pool-key))
           (try! (transfer-tokens (as-contract tx-sender) tx-sender token-x amount-x))
           (try! (transfer-tokens (as-contract tx-sender) tx-sender token-y amount-y))
           (map-set pools pool-key {
@@ -312,4 +367,65 @@
 
 (define-read-only (get-fee-rate)
   (ok (var-get fee-rate))
+)
+
+(define-public (claim-rewards (token-x principal) (token-y principal))
+  (let 
+    (
+      (pool-key (get-pool-key token-x token-y))
+      (user-lp-balance (get amount (get-user-lp-balance tx-sender (get token-x pool-key) (get token-y pool-key))))
+      (reward-info (get-reward-info tx-sender token-x token-y))
+      (pending-rewards (calculate-pending-rewards tx-sender token-x token-y))
+      (total-rewards (+ (get accumulated-rewards reward-info) pending-rewards))
+    )
+    (if (is-eq total-rewards u0)
+        (err u109)
+        (begin
+          (map-set reward-data 
+            { user: tx-sender, token-x: token-x, token-y: token-y }
+            { last-claim-height: stacks-block-height, accumulated-rewards: u0 }
+          )
+          (mint-tokens tx-sender (var-get reward-token) total-rewards)
+        )
+    )
+  )
+)
+
+(define-public (set-reward-rate (new-rate uint))
+  (if (is-eq tx-sender contract-owner)
+      (begin
+        (var-set reward-rate new-rate)
+        (ok new-rate)
+      )
+      err-owner-only
+  )
+)
+
+(define-public (set-reward-token (new-token principal))
+  (if (is-eq tx-sender contract-owner)
+      (begin
+        (var-set reward-token new-token)
+        (ok new-token)
+      )
+      err-owner-only
+  )
+)
+
+(define-read-only (get-reward-rate)
+  (ok (var-get reward-rate))
+)
+
+(define-read-only (get-reward-token)
+  (ok (var-get reward-token))
+)
+
+(define-read-only (get-pending-rewards (user principal) (token-x principal) (token-y principal))
+  (let 
+    (
+      (reward-info (get-reward-info user token-x token-y))
+      (pending-rewards (calculate-pending-rewards user token-x token-y))
+      (total-rewards (+ (get accumulated-rewards reward-info) pending-rewards))
+    )
+    (ok total-rewards)
+  )
 )
