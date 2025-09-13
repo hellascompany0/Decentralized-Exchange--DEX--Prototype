@@ -12,6 +12,7 @@
 (define-data-var fee-rate uint u300)
 (define-data-var reward-rate uint u100)
 (define-data-var reward-token principal tx-sender)
+(define-data-var flash-loan-fee uint u9)
 
 (define-map pools
   { token-x: principal, token-y: principal }
@@ -39,6 +40,11 @@
     last-claim-height: uint,
     accumulated-rewards: uint
   }
+)
+
+(define-map flash-loan-balances
+  { user: principal, token: principal }
+  { amount: uint }
 )
 
 (define-private (get-pool-key (token-x principal) (token-y principal))
@@ -71,6 +77,13 @@
   (default-to 
     { last-claim-height: u0, accumulated-rewards: u0 }
     (map-get? reward-data { user: user, token-x: token-x, token-y: token-y })
+  )
+)
+
+(define-read-only (get-flash-loan-balance (user principal) (token principal))
+  (default-to 
+    { amount: u0 }
+    (map-get? flash-loan-balances { user: user, token: token })
   )
 )
 
@@ -176,6 +189,22 @@
       }
     )
   )
+)
+
+(define-private (calculate-flash-loan-fee (amount uint))
+  (/ (* amount (var-get flash-loan-fee)) u10000)
+)
+
+(define-private (get-available-liquidity (token principal))
+  (get balance (get-token-balance (as-contract tx-sender) token))
+)
+
+(define-private (record-flash-loan (user principal) (token principal) (amount uint))
+  (map-set flash-loan-balances { user: user, token: token } { amount: amount })
+)
+
+(define-private (clear-flash-loan (user principal) (token principal))
+  (map-delete flash-loan-balances { user: user, token: token })
 )
 
 (define-public (create-pool (token-x principal) (token-y principal) (amount-x uint) (amount-y uint))
@@ -428,4 +457,72 @@
     )
     (ok total-rewards)
   )
+)
+
+(define-public (flash-loan (token principal) (amount uint))
+  (let 
+    (
+      (available-liquidity (get-available-liquidity token))
+      (fee-amount (calculate-flash-loan-fee amount))
+      (repay-amount (+ amount fee-amount))
+      (current-loan (get amount (get-flash-loan-balance tx-sender token)))
+    )
+    (if (> current-loan u0)
+        (err u110)
+        (if (> amount available-liquidity)
+            (err u111)
+            (if (is-eq amount u0)
+                (err u105)
+                (begin
+                  (record-flash-loan tx-sender token repay-amount)
+                  (mint-tokens tx-sender token amount)
+                )
+            )
+        )
+    )
+  )
+)
+
+(define-public (repay-flash-loan (token principal))
+  (let 
+    (
+      (loan-amount (get amount (get-flash-loan-balance tx-sender token)))
+      (user-balance (get balance (get-token-balance tx-sender token)))
+    )
+    (if (is-eq loan-amount u0)
+        (err u112)
+        (if (< user-balance loan-amount)
+            err-insufficient-balance
+            (begin
+              (clear-flash-loan tx-sender token)
+              (burn-tokens tx-sender token loan-amount)
+            )
+        )
+    )
+  )
+)
+
+(define-public (set-flash-loan-fee (new-fee uint))
+  (if (is-eq tx-sender contract-owner)
+      (if (> new-fee u1000)
+          (err u113)
+          (begin
+            (var-set flash-loan-fee new-fee)
+            (ok new-fee)
+          )
+      )
+      err-owner-only
+  )
+)
+
+(define-read-only (get-flash-loan-fee)
+  (ok (var-get flash-loan-fee))
+)
+
+(define-read-only (get-max-flash-loan (token principal))
+  (ok (get-available-liquidity token))
+)
+
+(define-read-only (calculate-flash-loan-cost (amount uint))
+  (ok (calculate-flash-loan-fee amount))
 )
