@@ -207,6 +207,31 @@
   (map-delete flash-loan-balances { user: user, token: token })
 )
 
+(define-private (pool-exists (token-x principal) (token-y principal))
+  (is-some (get-pool-info token-x token-y))
+)
+
+(define-private (calculate-output-amount (token-in principal) (token-out principal) (amount-in uint))
+  (let 
+    (
+      (pool-key (get-pool-key token-in token-out))
+      (pool-info-opt (map-get? pools pool-key))
+    )
+    (match pool-info-opt
+      pool-info
+        (let 
+          (
+            (is-token-x (is-eq token-in (get token-x pool-key)))
+            (reserve-in (if is-token-x (get reserve-x pool-info) (get reserve-y pool-info)))
+            (reserve-out (if is-token-x (get reserve-y pool-info) (get reserve-x pool-info)))
+          )
+          (some (get-amount-out amount-in reserve-in reserve-out))
+        )
+      none
+    )
+  )
+)
+
 (define-public (create-pool (token-x principal) (token-y principal) (amount-x uint) (amount-y uint))
   (let 
     (
@@ -525,4 +550,168 @@
 
 (define-read-only (calculate-flash-loan-cost (amount uint))
   (ok (calculate-flash-loan-fee amount))
+)
+
+(define-public (swap-multi-hop (token-in principal) (token-mid principal) (token-out principal) (amount-in uint) (min-amount-out uint))
+  (let 
+    (
+      (pool1-exists (pool-exists token-in token-mid))
+      (pool2-exists (pool-exists token-mid token-out))
+    )
+    (if (not pool1-exists)
+        (err u114)
+        (if (not pool2-exists)
+            (err u115)
+            (if (is-eq amount-in u0)
+                (err u105)
+                (let 
+                  (
+                    (mid-amount-opt (calculate-output-amount token-in token-mid amount-in))
+                  )
+                  (match mid-amount-opt
+                    mid-amount
+                      (let 
+                        (
+                          (final-amount-opt (calculate-output-amount token-mid token-out mid-amount))
+                        )
+                        (match final-amount-opt
+                          final-amount
+                            (if (< final-amount min-amount-out)
+                                (err u106)
+                                (begin
+                                  (try! (swap-exact-tokens-for-tokens token-in token-mid amount-in u0))
+                                  (swap-exact-tokens-for-tokens token-mid token-out mid-amount min-amount-out)
+                                )
+                            )
+                          (err u116)
+                        )
+                      )
+                    (err u116)
+                  )
+                )
+            )
+        )
+    )
+  )
+)
+
+(define-read-only (preview-multi-hop-swap (token-in principal) (token-mid principal) (token-out principal) (amount-in uint))
+  (let 
+    (
+      (pool1-exists (pool-exists token-in token-mid))
+      (pool2-exists (pool-exists token-mid token-out))
+    )
+    (if (not pool1-exists)
+        (err u114)
+        (if (not pool2-exists)
+            (err u115)
+            (if (is-eq amount-in u0)
+                (err u105)
+                (let 
+                  (
+                    (mid-amount-opt (calculate-output-amount token-in token-mid amount-in))
+                  )
+                  (match mid-amount-opt
+                    mid-amount
+                      (let 
+                        (
+                          (final-amount-opt (calculate-output-amount token-mid token-out mid-amount))
+                        )
+                        (match final-amount-opt
+                          final-amount
+                            (ok final-amount)
+                          (err u116)
+                        )
+                      )
+                    (err u116)
+                  )
+                )
+            )
+        )
+    )
+  )
+)
+
+(define-read-only (get-optimal-route (token-in principal) (token-out principal) (token-mid-a principal) (token-mid-b principal) (amount-in uint))
+  (let 
+    (
+      (route-a-opt (calculate-output-amount token-in token-mid-a amount-in))
+      (route-b-opt (calculate-output-amount token-in token-mid-b amount-in))
+      (direct-opt (calculate-output-amount token-in token-out amount-in))
+    )
+    (match direct-opt
+      direct-amount
+        (ok { route: "direct", output: direct-amount, mid-token: token-in })
+      (match route-a-opt
+        mid-amount-a
+          (let 
+            (
+              (final-a-opt (calculate-output-amount token-mid-a token-out mid-amount-a))
+            )
+            (match final-a-opt
+              final-a
+                (match route-b-opt
+                  mid-amount-b
+                    (let 
+                      (
+                        (final-b-opt (calculate-output-amount token-mid-b token-out mid-amount-b))
+                      )
+                      (match final-b-opt
+                        final-b
+                          (if (> final-a final-b)
+                              (ok { route: "route-a", output: final-a, mid-token: token-mid-a })
+                              (ok { route: "route-b", output: final-b, mid-token: token-mid-b })
+                          )
+                        (ok { route: "route-a", output: final-a, mid-token: token-mid-a })
+                      )
+                    )
+                  (ok { route: "route-a", output: final-a, mid-token: token-mid-a })
+                )
+              (match route-b-opt
+                mid-amount-b
+                  (let 
+                    (
+                      (final-b-opt (calculate-output-amount token-mid-b token-out mid-amount-b))
+                    )
+                    (match final-b-opt
+                      final-b
+                        (ok { route: "route-b", output: final-b, mid-token: token-mid-b })
+                      (err u117)
+                    )
+                  )
+                (err u117)
+              )
+            )
+          )
+        (match route-b-opt
+          mid-amount-b
+            (let 
+              (
+                (final-b-opt (calculate-output-amount token-mid-b token-out mid-amount-b))
+              )
+              (match final-b-opt
+                final-b
+                  (ok { route: "route-b", output: final-b, mid-token: token-mid-b })
+                (err u117)
+              )
+            )
+          (err u117)
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (find-best-path (token-in principal) (token-out principal) (amount-in uint))
+  (let 
+    (
+      (direct-exists (pool-exists token-in token-out))
+      (direct-output-opt (if direct-exists (calculate-output-amount token-in token-out amount-in) none))
+    )
+    (match direct-output-opt
+      direct-output
+        (ok { path-type: "direct", expected-output: direct-output, requires-routing: false })
+      (ok { path-type: "multi-hop", expected-output: u0, requires-routing: true })
+    )
+  )
 )
