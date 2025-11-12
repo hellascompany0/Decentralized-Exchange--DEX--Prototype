@@ -8,11 +8,13 @@
 (define-constant err-slippage-too-high (err u106))
 (define-constant err-invalid-token (err u107))
 (define-constant err-pool-exists (err u108))
+(define-constant err-paused (err u117))
 
 (define-data-var fee-rate uint u300)
 (define-data-var reward-rate uint u100)
 (define-data-var reward-token principal tx-sender)
 (define-data-var flash-loan-fee uint u9)
+(define-data-var paused bool false)
 
 (define-map pools
   { token-x: principal, token-y: principal }
@@ -353,7 +355,9 @@
 )
 
 (define-public (swap-exact-tokens-for-tokens (token-in principal) (token-out principal) (amount-in uint) (min-amount-out uint))
-  (let 
+  (begin
+    (try! (ensure-not-paused))
+    (let 
     (
       (pool-key (get-pool-key token-in token-out))
       (pool-info (unwrap! (map-get? pools pool-key) err-pool-not-found))
@@ -378,6 +382,7 @@
               (ok amount-out)
             )
         )
+    )
     )
   )
 )
@@ -421,6 +426,27 @@
 
 (define-read-only (get-fee-rate)
   (ok (var-get fee-rate))
+)
+
+(define-public (set-paused (new-paused bool))
+  (if (is-eq tx-sender contract-owner)
+      (begin
+        (var-set paused new-paused)
+        (ok new-paused)
+      )
+      err-owner-only
+  )
+)
+
+(define-read-only (get-paused)
+  (ok (var-get paused))
+)
+
+(define-private (ensure-not-paused)
+  (if (var-get paused)
+      err-paused
+      (ok true)
+  )
 )
 
 (define-public (claim-rewards (token-x principal) (token-y principal))
@@ -485,7 +511,9 @@
 )
 
 (define-public (flash-loan (token principal) (amount uint))
-  (let 
+  (begin
+    (try! (ensure-not-paused))
+    (let 
     (
       (available-liquidity (get-available-liquidity token))
       (fee-amount (calculate-flash-loan-fee amount))
@@ -504,6 +532,7 @@
                 )
             )
         )
+    )
     )
   )
 )
@@ -553,7 +582,9 @@
 )
 
 (define-public (swap-multi-hop (token-in principal) (token-mid principal) (token-out principal) (amount-in uint) (min-amount-out uint))
-  (let 
+  (begin
+    (try! (ensure-not-paused))
+    (let 
     (
       (pool1-exists (pool-exists token-in token-mid))
       (pool2-exists (pool-exists token-mid token-out))
@@ -591,6 +622,7 @@
                 )
             )
         )
+    )
     )
   )
 )
