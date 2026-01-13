@@ -26,6 +26,11 @@
   }
 )
 
+(define-map pool-fees
+  { token-x: principal, token-y: principal }
+  { fee-rate: uint }
+)
+
 (define-map user-lp-tokens
   { user: principal, token-x: principal, token-y: principal }
   { amount: uint }
@@ -218,6 +223,7 @@
     (
       (pool-key (get-pool-key token-in token-out))
       (pool-info-opt (map-get? pools pool-key))
+      (fee-opt (map-get? pool-fees pool-key))
     )
     (match pool-info-opt
       pool-info
@@ -226,8 +232,9 @@
             (is-token-x (is-eq token-in (get token-x pool-key)))
             (reserve-in (if is-token-x (get reserve-x pool-info) (get reserve-y pool-info)))
             (reserve-out (if is-token-x (get reserve-y pool-info) (get reserve-x pool-info)))
+            (fee (match fee-opt f (get fee-rate f) (var-get fee-rate)))
           )
-          (some (get-amount-out amount-in reserve-in reserve-out))
+          (some (get-amount-out-with-fee amount-in reserve-in reserve-out fee))
         )
       none
     )
@@ -354,6 +361,17 @@
   )
 )
 
+(define-private (get-amount-out-with-fee (amount-in uint) (reserve-in uint) (reserve-out uint) (fee uint))
+  (let 
+    (
+      (amount-in-with-fee (- amount-in (/ (* amount-in fee) u10000)))
+      (numerator (* amount-in-with-fee reserve-out))
+      (denominator (+ reserve-in amount-in-with-fee))
+    )
+    (/ numerator denominator)
+  )
+)
+
 (define-public (swap-exact-tokens-for-tokens (token-in principal) (token-out principal) (amount-in uint) (min-amount-out uint))
   (begin
     (try! (ensure-not-paused))
@@ -364,7 +382,9 @@
       (is-token-x (is-eq token-in (get token-x pool-key)))
       (reserve-in (if is-token-x (get reserve-x pool-info) (get reserve-y pool-info)))
       (reserve-out (if is-token-x (get reserve-y pool-info) (get reserve-x pool-info)))
-      (amount-out (get-amount-out amount-in reserve-in reserve-out))
+      (fee-opt (map-get? pool-fees pool-key))
+      (fee (match fee-opt f (get fee-rate f) (var-get fee-rate)))
+      (amount-out (get-amount-out-with-fee amount-in reserve-in reserve-out fee))
     )
     (if (< amount-out min-amount-out)
         err-slippage-too-high
@@ -396,7 +416,13 @@
       (reserve-in (if is-token-x (get reserve-x pool-info) (get reserve-y pool-info)))
       (reserve-out (if is-token-x (get reserve-y pool-info) (get reserve-x pool-info)))
     )
-    (ok (get-amount-out amount-in reserve-in reserve-out))
+    (let 
+      (
+        (fee-opt (map-get? pool-fees pool-key))
+        (fee (match fee-opt f (get fee-rate f) (var-get fee-rate)))
+      )
+      (ok (get-amount-out-with-fee amount-in reserve-in reserve-out fee))
+    )
   )
 )
 
@@ -426,6 +452,35 @@
 
 (define-read-only (get-fee-rate)
   (ok (var-get fee-rate))
+)
+
+(define-read-only (get-pool-fee-rate (token-x principal) (token-y principal))
+  (let
+    (
+      (pool-key (get-pool-key token-x token-y))
+      (fee-opt (map-get? pool-fees pool-key))
+    )
+    (match fee-opt
+      fee
+        (ok (get fee-rate fee))
+      (ok (var-get fee-rate))
+    )
+  )
+)
+
+(define-public (set-pool-fee-rate (token-x principal) (token-y principal) (new-fee uint))
+  (if (is-eq tx-sender contract-owner)
+      (let
+        (
+          (pool-key (get-pool-key token-x token-y))
+        )
+        (begin
+          (map-set pool-fees pool-key { fee-rate: new-fee })
+          (ok new-fee)
+        )
+      )
+      err-owner-only
+  )
 )
 
 (define-public (set-paused (new-paused bool))
